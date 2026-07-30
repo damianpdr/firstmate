@@ -370,7 +370,63 @@ test_policy_cli_direct() {
   pass "cd-guard: fm-cd-command-policy.mjs CLI honors the deny/allow output contract"
 }
 
-# --- per-harness wiring -----------------------------------------------------
+# --- OMP native hook transport -----------------------------------------------
+
+
+test_omp_tool_call_runs_cd_before_arm_behaviorally() {
+  local fixture home ext log out status expected
+  fixture=$(fm_test_tmproot fm-cd-pretool-omp)
+  home="$fixture/home"
+  ext="$fixture/.omp/extensions/fm-primary-turnend-guard.ts"
+  log="$fixture/checkers.log"
+  mkdir -p "$fixture/.omp/extensions" "$fixture/bin" "$home/state"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cat > "$fixture/bin/fm-cd-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'cd:%s\n' "$*" >> "${FM_CHECKER_LOG:?}"
+case "$*" in
+  *"cd projects/foo"*)
+    printf 'cd denied\n' >&2
+    exit 2
+    ;;
+esac
+exit 0
+SH
+  cat > "$fixture/bin/fm-arm-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm:%s\n' "$*" >> "${FM_CHECKER_LOG:?}"
+printf 'arm denied\n' >&2
+exit 2
+SH
+  chmod +x "$fixture/bin/fm-cd-pretool-check.sh" "$fixture/bin/fm-arm-pretool-check.sh"
+  out=$(PLUGIN="$ext" FM_HOME="$home" FM_CHECKER_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const pi = { on(event, handler) { handlers.set(event, handler); } };
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const toolCall = handlers.get("tool_call");
+if (!toolCall) throw new Error("OMP tool_call handler was not registered");
+const safeCd = await toolCall({ type: "tool_call", toolName: "bash", input: { command: "echo safe" } });
+if (safeCd?.reason !== "arm denied") throw new Error(`arm checker did not run after cd allowed: ${JSON.stringify(safeCd)}`);
+const deniedCd = await toolCall({ type: "tool_call", toolName: "bash", input: { command: "cd projects/foo" } });
+if (deniedCd?.block !== true || deniedCd.reason !== "cd denied") {
+  throw new Error(`cd denial was not returned directly: ${JSON.stringify(deniedCd)}`);
+}
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "OMP tool_call checker ordering"
+  [ -z "$out" ] || fail "OMP tool_call checker ordering printed output: $out"
+  expected=$(printf '%s\n' \
+    'cd:--command echo safe' \
+    'arm:--command echo safe' \
+    'cd:--command cd projects/foo')
+  [ "$(cat "$log")" = "$expected" ] \
+    || fail "OMP tool_call did not run cd before arm or failed to short-circuit a cd denial"
+  pass ".omp primary extension: tool_call runs cd before arm and short-circuits cd denial"
+}
 
 test_scripts_are_shellcheck_clean() {
   command -v shellcheck >/dev/null 2>&1 || { pass "shellcheck not installed, skipping"; return; }
@@ -391,4 +447,6 @@ test_fail_open_missing_node
 test_fail_open_missing_jq_on_stdin
 test_prefilter_skips_node_without_cd_substring
 test_policy_cli_direct
+
+test_omp_tool_call_runs_cd_before_arm_behaviorally
 test_scripts_are_shellcheck_clean

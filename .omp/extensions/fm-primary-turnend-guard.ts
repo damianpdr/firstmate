@@ -1,12 +1,11 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
-let guardFollowupActive = false;
+let forcedThisEpisode = false;
 
 type LockOwnership = "owned" | "missing" | "other";
 
@@ -15,7 +14,7 @@ const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
 const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
-const marker = `${state}/.pi-turnend-extension-loaded`;
+const marker = `${state}/.omp-turnend-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 
 function parentPid(pid: string): string {
@@ -50,9 +49,11 @@ function lockOwnership(): LockOwnership {
   return pidAlive(lockPid) ? "other" : "missing";
 }
 
-function markLoaded(): void {
-  if (!existsSync(state) || lockOwnership() === "other") return;
+function markLoaded() {
+  if (lockOwnership() === "other") return false;
+  mkdirSync(state, { recursive: true });
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
+  return true;
 }
 
 function runSessionstartNudge(): string {
@@ -62,40 +63,36 @@ function runSessionstartNudge(): string {
 }
 
 function runGuard(): Promise<{ code: number; stderr: string }> {
-  return new Promise((resolveResult) => {
-    const child = spawn(`${root}/bin/fm-turnend-guard.sh`, {
-      stdio: ["pipe", "ignore", "pipe"],
-    });
-    let stderr = "";
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.stdin.on("error", () => {});
-    child.on("error", () => resolveResult({ code: 0, stderr: "" }));
-    child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
-    child.stdin.end('{"stop_hook_active":false}');
+  const { promise, resolve: resolveResult } = Promise.withResolvers<{ code: number; stderr: string }>();
+  const child = spawn(`${root}/bin/fm-turnend-guard.sh`, {
+    stdio: ["pipe", "ignore", "pipe"],
   });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk.toString();
+  });
+  child.stdin.on("error", () => {});
+  child.on("error", () => resolveResult({ code: 0, stderr: "" }));
+  child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
+  child.stdin.end('{"stop_hook_active":false}');
+  return promise;
 }
 
-// PreToolUse seatbelts (bin/fm-arm-pretool-check.sh, docs/arm-pretool-check.md;
-// bin/fm-cd-pretool-check.sh, docs/cd-guard.md). Both piggyback on this same
-// extension file rather than separate ones so no extra Pi -e flag is needed at
-// launch - the primary already loads this file for the turn-end guard, and
-// pi.on("tool_call", ...) can block (verified 2026-07-09 against pi 0.80.5:
-// returning {block: true} prevents the bash command from running). Each owner
-// script owns its own decision and is inert outside the real primary checkout.
+// omp 16.4.8 exposes Pi's tool_call API and honors {block: true} before bash
+// execution. Both shared checkers own their own decisions and fail open when
+// unavailable; this extension owns only the harness transport.
 function runChecker(script: string, command: string): Promise<{ code: number; stderr: string }> {
-  return new Promise((resolveResult) => {
-    const child = spawn(`${root}/bin/${script}`, ["--command", command], {
-      stdio: ["ignore", "ignore", "pipe"],
-    });
-    let stderr = "";
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.on("error", () => resolveResult({ code: 0, stderr: "" }));
-    child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
+  const { promise, resolve: resolveResult } = Promise.withResolvers<{ code: number; stderr: string }>();
+  const child = spawn(`${root}/bin/${script}`, ["--command", command], {
+    stdio: ["ignore", "ignore", "pipe"],
   });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk.toString();
+  });
+  child.on("error", () => resolveResult({ code: 0, stderr: "" }));
+  child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
+  return promise;
 }
 
 function runPretoolCheck(command: string): Promise<{ code: number; stderr: string }> {
@@ -107,18 +104,12 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.on?.("session_start", (event) => {
-    const reason = String((event as { reason?: unknown }).reason ?? "");
-    const nudge = ["startup", "new", "resume"].includes(reason) ? runSessionstartNudge() : "";
+  pi.on?.("session_start", () => {
+    const nudge = runSessionstartNudge();
     markLoaded();
     if (!nudge) return;
     try {
-      pi.sendMessage({
-        customType: "firstmate-sessionstart-nudge",
-        content: nudge,
-        display: false,
-        details: { kind: "session-start" },
-      });
+      pi.sendMessage({ customType: "firstmate-sessionstart-nudge", content: nudge, display: false });
     } catch {
     }
   });
@@ -136,27 +127,22 @@ export default function (pi: ExtensionAPI) {
     return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
   });
 
-  pi.on("agent_settled", async () => {
-    if (guardFollowupActive) {
-      guardFollowupActive = false;
+  pi.on("session_stop", async () => {
+    if (forcedThisEpisode) {
+      forcedThisEpisode = false;
       return;
     }
 
     const result = await runGuard();
     if (result.code !== 2) return;
 
-    guardFollowupActive = true;
-    try {
-      const content = encodeFirstmateOperationalInput(
-        "turn-end-guard",
-        "TURN WOULD END BLIND - supervision is off. " +
-          "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
-          result.stderr,
-      );
-      await pi.sendUserMessage(content, { deliverAs: "followUp" });
-    } catch {
-      guardFollowupActive = false;
-    }
+    forcedThisEpisode = true;
+    return {
+      continue: true,
+      additionalContext:
+        "TURN WOULD END BLIND - supervision is off. Resume supervision according to the session-start operating block before ending the turn.\n\n" +
+        result.stderr,
+    };
   });
 
   markLoaded();

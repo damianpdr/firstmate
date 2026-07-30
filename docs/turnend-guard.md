@@ -44,6 +44,7 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
 - Pi listens for `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.
 - Grok registers a `Stop` hook in `.grok/hooks/fm-primary-turnend-guard.json` and delegates capability selection to `bin/fm-turnend-guard-grok.sh`.
   The tracked Claude Stop entries are inert when `GROK_AGENT` is present, so Grok's Claude-compatible settings loading cannot create a second continuation path.
+- OMP loads a tracked auto-discovered `.omp/extensions/fm-primary-turnend-guard.ts` under omp's native extensions root, listens for `session_stop`, and returns `{ continue: true, additionalContext }` once when the shared guard returns 2, bounded by a one-shot flag and omp's built-in 8-continuation cap.
 
 Claude and Codex can block a Stop directly with exit status 2 and stderr.
 Both payloads carry `stop_hook_active`.
@@ -55,7 +56,11 @@ The Claude mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 millis
 When none of those proofs appears, it re-blocks up to `FM_CLAUDE_TURNEND_BLOCK_BUDGET` times (default 3, below Claude's 8-block override), then allows degraded with a visible `systemMessage`.
 Any allow resets the budget.
 
-OpenCode, Pi, and pi-signed expose passive callbacks for this purpose.
+omp is a third mechanism: direct-blocking via the `session_stop` handler's return value rather than an exit-2 hook process.
+Its extension runs the same shared guard and, when the guard returns 2, returns `{ continue: true, additionalContext }` so omp forces one more turn with the guard reason as context.
+omp always pipes `stop_hook_active:false`, so it never relies on the exit-2 loop-guard field; a one-shot in-process flag plus omp's built-in 8-continuation cap bound the forced continuation instead.
+
+OpenCode, Pi, and pi-signed expose passive callbacks for this purpose; Grok uses the same bounded follow-up class only on its pre-native fallback.
 Their adapters fail open at the hook boundary to protect the user session but schedule one bounded follow-up when the predicate blocks.
 The generated prompts use the canonical `turn-end-guard` kind after the U+2063 `FIRSTMATE_OP: ` prefix, so Ahoy does not treat them as captain messages.
 Each passive adapter owns a loop latch.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
+# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--allow-project-omp-extensions] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
@@ -27,6 +27,11 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
+#   --allow-project-omp-extensions bypasses omp's fail-closed check for tracked
+#   project `.omp/extensions` code. Use it only after explicit captain approval:
+#   omp auto-executes those files before the model reasons about the task, and
+#   firstmate launches omp with --auto-approve. An exact copy of firstmate's own
+#   sole tracked primary guard is allowlisted for firstmate-on-itself tasks.
 #   Herdr additionally supports a default-off presentation-only layout when the
 #   local config/herdr-presentation-spaces flag exists. A clean fresh task first
 #   writes state/<id>.herdr-presentation atomically, then creates a disposable
@@ -59,7 +64,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|omp)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. pi-signed launches that exact executable name from PATH and
@@ -101,6 +106,8 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
+#     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts (omp turn-end
+#                  extension, written by this script; outside the worktree, loaded via -e)
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
@@ -115,7 +122,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,83p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -176,6 +183,8 @@ HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
+ALLOW_PROJECT_OMP_EXTENSIONS=0
+RAW_LAUNCH=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -204,6 +213,7 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --allow-project-omp-extensions) ALLOW_PROJECT_OMP_EXTENSIONS=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -378,6 +388,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  [ "$ALLOW_PROJECT_OMP_EXTENSIONS" -eq 0 ] || shared_args+=(--allow-project-omp-extensions)
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -409,7 +420,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|omp)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -470,6 +481,18 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    omp)
+      # omp (Oh My Pi): positional prompt starts the supervised interactive session.
+      # --auto-approve forces approvalMode=yolo for unattended runs (omp, unlike pi,
+      # HAS an approval system). Crewmate/scout load a turn-end SIGNAL extension via -e
+      # (written outside the worktree, like pi). Secondmate needs neither: its primary
+      # guard auto-discovers from the home's tracked .omp/extensions/, watcher is native.
+      if [ "$kind" = secondmate ]; then
+        printf '%s' 'omp --auto-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      else
+        printf '%s' 'omp --auto-approve __MODELFLAG____EFFORTFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      fi
+      ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -482,6 +505,7 @@ launch_template() {
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
+    RAW_LAUNCH=1
     HARNESS=""
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
@@ -598,7 +622,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|omp)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -633,6 +657,13 @@ effort_flag_for_harness() {
     pi|pi-signed)
       # Pi 0.80.6 accepts the full shared effort vocabulary, including max, through
       # its --thinking flag.
+      case "$effort" in
+        low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
+    omp)
+      # omp accepts --thinking off|minimal|low|medium|high|xhigh|max|auto.
+      # Firstmate's full shared effort axis maps directly on omp 16.4.8.
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
       esac
@@ -835,6 +866,31 @@ fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
 BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
+
+omp_project_extension_preflight() {
+  local project=$1 tracked trusted
+  [ "$HARNESS" = omp ] || return 0
+  [ "$KIND" != secondmate ] || return 0
+  tracked=$(git -C "$project" ls-tree -r --name-only HEAD -- .omp/extensions 2>/dev/null || true)
+  [ -n "$tracked" ] || return 0
+  if [ "$ALLOW_PROJECT_OMP_EXTENSIONS" -eq 1 ]; then
+    echo "warning: launching omp with explicitly approved tracked project extensions:" >&2
+    printf '%s\n' "$tracked" | sed 's/^/  /' >&2
+    return 0
+  fi
+  trusted="$FM_ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
+  if [ "$tracked" = ".omp/extensions/fm-primary-turnend-guard.ts" ] \
+    && [ -f "$trusted" ] \
+    && git -C "$project" show HEAD:.omp/extensions/fm-primary-turnend-guard.ts 2>/dev/null | cmp -s - "$trusted"; then
+    return 0
+  fi
+  echo "error: refusing omp launch because the project tracks auto-executed .omp/extensions code:" >&2
+  printf '%s\n' "$tracked" | sed 's/^/  /' >&2
+  echo "omp runs tracked extensions before the model reasons about the task and firstmate passes --auto-approve. Select another verified harness, or pass --allow-project-omp-extensions only after explicit captain approval." >&2
+  return 1
+}
+
+omp_project_extension_preflight "$PROJ_ABS" || exit 1
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
@@ -1350,11 +1406,16 @@ export const FmTurnEnd = async ({ \$ }) => ({
 EOF
       exclude_path '.opencode/plugins/fm-turn-end.js'
       ;;
-    pi|pi-signed)
-      # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
-      # loaded from inside the project (verified live), but an explicit -e path
-      # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
-      cat > "$STATE/$ID.pi-ext.ts" <<EOF
+    pi|pi-signed|omp)
+      # Written OUTSIDE the worktree: pi's project-trust gate fires on any
+      # extension loaded from inside the project, while an explicit -e path
+      # elsewhere loads without a dialog. The same path keeps omp's per-task
+      # signal out of the project. Both live in state/ and teardown cleans them.
+      case "$HARNESS" in
+        pi|pi-signed) signal_ext="$STATE/$ID.pi-ext.ts" ;;
+        omp) signal_ext="$STATE/$ID.omp-ext.ts" ;;
+      esac
+      cat > "$signal_ext" <<EOF
 // Firstmate turn-end signal; written by fm-spawn.
 // Use "turn_end" (fires after each turn the agent finishes), not "agent_end"
 // (fires once, only when the whole run exits): the watcher needs a signal at
@@ -1492,7 +1553,7 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} > "$STATE/$ID.meta" || exit 1  # explicit exit: macOS bash 3.2 skips errexit on a compound redirection failure
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
@@ -1500,6 +1561,7 @@ sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
+sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
@@ -1510,7 +1572,14 @@ LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
+LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+# A Firstmate primary's harness markers can be inherited by the detached
+# backend shell that launches a different configured harness. Remove them at
+# the launch boundary; each harness establishes its own markers for children.
+if [ "$RAW_LAUNCH" -eq 0 ]; then
+  LAUNCH="env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS $LAUNCH"
+fi
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a

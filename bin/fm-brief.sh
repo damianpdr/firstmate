@@ -33,7 +33,7 @@
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
-# Ship briefs begin with a worktree-isolation assertion before the branch step.
+# Ship briefs begin with a worktree-isolation assertion before the branch step, then require dependency installation before tooling or tests so fresh worktrees have usable language servers and test environments.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
@@ -328,26 +328,30 @@ EOF
     ;;
   *)  # no-mistakes (default)
     SETUP2="
-2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+3. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
-    IFS= read -r -d '' DOD <<EOF || true
+    # read, not DOD=$(cat <<EOF): macOS system bash 3.2's $() scanner cannot
+    # parse heredoc content with an unbalanced quote character (the apostrophe
+    # in "firstmate's"), so this expansion-free block must stay outside $().
+    IFS= read -r -d '' DOD <<'EOF' || true
 # Definition of done
 The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
+When you believe it is complete, append `done: {summary}` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
-Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
+Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and `no-mistakes axi run --help` plus the `help` lines in each `axi` response are authoritative and version-matched to the installed binary.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
 Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
-  Firstmate applies the authority contract in its \`AGENTS.md\` and obtains any required captain decision.
-  When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
+  Firstmate applies the authority contract in its `AGENTS.md` and obtains any required captain decision.
+  When the decision comes back, feed it to the gate with `no-mistakes axi respond` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
+- Avoid `--yes`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append `done: PR {url} checks green` and stop. You are finished.
 EOF
+
     ;;
 esac
 
@@ -371,7 +375,8 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. First action: create your branch: \`git checkout -b fm/$ID\`
+2. Install this worktree's dependencies before any tooling or tests: it was freshly cut and has no .venv/node_modules, so language servers and test runs are degraded until you do. Detect the stack and run the project's setup - Python (pyproject.toml/requirements*.txt): create a .venv and install (prefer \`uv sync\`, else \`pip install -r requirements*.txt\` plus any requirements-dev.txt); Node/TypeScript (package.json): \`npm ci\` (or the project's package manager). Prefer any setup command the README/AGENTS.md documents. Skip only if there's no dependency manifest.$SETUP2
 
 # Rules
 $RULE1

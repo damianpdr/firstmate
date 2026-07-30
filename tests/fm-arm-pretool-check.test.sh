@@ -437,7 +437,53 @@ test_allow_is_silent_both_modes() {
   pass "allow is silent on both stdout and stderr in default and --claude mode"
 }
 
-# --- harness wiring: each adapter invokes the shared checker -----------------
+# --- OMP native hook transport -----------------------------------------------
+
+
+test_omp_tool_call_blocks_arm_denial_behaviorally() {
+  local fixture home ext log out status
+  fixture=$(fm_test_tmproot fm-arm-pretool-omp)
+  home="$fixture/home"
+  ext="$fixture/.omp/extensions/fm-primary-turnend-guard.ts"
+  log="$fixture/arm.log"
+  mkdir -p "$fixture/.omp/extensions" "$fixture/bin" "$home/state"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cat > "$fixture/bin/fm-cd-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fixture/bin/fm-arm-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "${FM_ARM_LOG:?}"
+printf 'watcher arm denied\n' >&2
+exit 2
+SH
+  chmod +x "$fixture/bin/fm-cd-pretool-check.sh" "$fixture/bin/fm-arm-pretool-check.sh"
+  out=$(PLUGIN="$ext" FM_HOME="$home" FM_ARM_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const pi = { on(event, handler) { handlers.set(event, handler); } };
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const toolCall = handlers.get("tool_call");
+if (!toolCall) throw new Error("OMP tool_call handler was not registered");
+const result = await toolCall({
+  type: "tool_call",
+  toolName: "bash",
+  input: { command: "bin/fm-watch-arm.sh &" },
+});
+if (result?.block !== true) throw new Error(`arm denial was not blocked: ${JSON.stringify(result)}`);
+if (result.reason !== "watcher arm denied") throw new Error(`arm denial reason was not preserved: ${result.reason}`);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "OMP tool_call arm denial transport"
+  [ -z "$out" ] || fail "OMP tool_call arm denial transport printed output: $out"
+  [ "$(cat "$log")" = "--command bin/fm-watch-arm.sh &" ] \
+    || fail "OMP tool_call did not forward the exact bash command to the arm checker"
+  pass ".omp primary extension: tool_call behaviorally blocks an arm-check denial"
+}
 
 # --- shellcheck (belt-and-suspenders; CI/CONTRIBUTING.md also runs this) -----
 
@@ -464,4 +510,6 @@ test_failopen_missing_node
 test_claude_mode_stdout_empty_on_deny
 test_default_mode_stdout_has_grok_json_on_deny
 test_allow_is_silent_both_modes
+
+test_omp_tool_call_blocks_arm_denial_behaviorally
 test_shellcheck_clean

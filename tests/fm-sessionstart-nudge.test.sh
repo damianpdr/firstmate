@@ -148,6 +148,49 @@ EOF
   pass "OpenCode session.created delivers the exact wrapper nudge once per session"
 }
 
+test_omp_session_start_delivers_exact_nudge() {
+  local root home ext out status=0
+  root="$TMP_ROOT/omp-primary"
+  home="$TMP_ROOT/omp-home"
+  ext="$root/.omp/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$root/.omp/extensions" "$root/bin" "$home/state"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cat > "$root/bin/fm-sessionstart-nudge.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${EXPECTED:?}"
+SH
+  chmod +x "$root/bin/fm-sessionstart-nudge.sh"
+  out=$(PLUGIN="$ext" FM_HOME="$home" EXPECTED="$NUDGE_LINE" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const messages = [];
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  sendMessage(message) {
+    messages.push(message);
+  },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const sessionStart = handlers.get("session_start");
+if (!sessionStart) throw new Error("OMP session_start handler was not registered");
+sessionStart({ type: "session_start" });
+if (messages.length !== 1) throw new Error(`expected one OMP nudge, got ${messages.length}`);
+const message = messages[0];
+if (message.customType !== "firstmate-sessionstart-nudge") throw new Error(`unexpected custom type: ${message.customType}`);
+if (message.content !== process.env.EXPECTED) throw new Error(`unexpected nudge: ${message.content}`);
+if (message.display !== false) throw new Error("OMP nudge must remain hidden context");
+EOF
+  ) || status=$?
+  expect_code 0 "$status" "OMP exact session_start nudge delivery"
+  [ -z "$out" ] || fail "OMP exact session_start nudge delivery printed output: $out"
+  pass "OMP session_start delivers the exact wrapper nudge for the native event payload"
+}
+
+
 test_genuine_primary_nudges
 test_gate_env_is_silent
 test_gate_common_dir_is_silent
@@ -156,3 +199,4 @@ test_linked_secondmate_primary_nudges
 test_missing_state_is_silent
 test_owned_lock_is_silent
 test_opencode_plugin_delivers_exact_nudge_once
+test_omp_session_start_delivers_exact_nudge
