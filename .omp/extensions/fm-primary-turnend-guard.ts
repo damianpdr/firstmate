@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
@@ -49,11 +49,19 @@ function lockOwnership(): LockOwnership {
   return pidAlive(lockPid) ? "other" : "missing";
 }
 
-function markLoaded() {
-  if (lockOwnership() === "other") return false;
-  mkdirSync(state, { recursive: true });
+function primaryScopeMatches(): boolean {
+  const result = spawnSync(
+    "/bin/bash",
+    ["-c", '. "$1"; fm_primary_scope_matches "$2" "$3"', "firstmate-primary-scope",
+      `${root}/bin/fm-primary-scope-lib.sh`, root, state],
+    { stdio: "ignore" },
+  );
+  return result.status === 0;
+}
+
+function markLoaded(): void {
+  if (!primaryScopeMatches() || lockOwnership() === "other") return;
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
-  return true;
 }
 
 function runSessionstartNudge(): string {
@@ -66,6 +74,7 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
   const { promise, resolve: resolveResult } = Promise.withResolvers<{ code: number; stderr: string }>();
   const child = spawn(`${root}/bin/fm-turnend-guard.sh`, {
     stdio: ["pipe", "ignore", "pipe"],
+    env: { ...process.env, OMPCODE: "1" },
   });
   let stderr = "";
   child.stderr.on("data", (chunk) => {

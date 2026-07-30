@@ -219,7 +219,7 @@ test_ship_dependency_setup_renders_all_modes() {
   home="$TMP_ROOT/dependency-setup-home"
   write_registry "$home"
   IFS= read -r dependency_step <<'EOF'
-2. Install this worktree's dependencies before any tooling or tests: it was freshly cut and has no .venv/node_modules, so language servers and test runs are degraded until you do. Detect the stack and run the project's setup - Python (pyproject.toml/requirements*.txt): create a .venv and install (prefer `uv sync`, else `pip install -r requirements*.txt` plus any requirements-dev.txt); Node/TypeScript (package.json): `npm ci` (or the project's package manager). Prefer any setup command the README/AGENTS.md documents. Skip only if there's no dependency manifest.
+2. Install this worktree's dependencies before any tooling or tests: it was freshly cut and has no .venv/node_modules, so language servers and test runs are degraded until you do. Detect the stack and run the project's setup - Python (pyproject.toml/requirements*.txt): create a .venv and install (prefer `uv sync`, else pass each discovered requirements file with its own `-r`, for example `pip install -r requirements.txt -r requirements-dev.txt`); Node/TypeScript (package.json): `npm ci` (or the project's package manager). Prefer any setup command the README/AGENTS.md documents. Skip only if there's no dependency manifest.
 EOF
 
   for id_proj in "brief-deps-nomistakes:no-registry-proj" "brief-deps-direct:direct-proj" "brief-deps-local:local-proj"; do

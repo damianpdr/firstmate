@@ -256,6 +256,7 @@ ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 HERDR_PROJECTION_ABORT_CLEANUP=0
+ALLOCATED_WORKTREE_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
@@ -284,12 +285,13 @@ parse_orca_worktree_result() {
 }
 
 spawn_abort_cleanup() {
-  local status=$?
+  local status=$? return_failed=0
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
       echo "warning: herdr presentation focus lock unavailable; retaining the projection journal and refusing concurrent abort cleanup" >&2
       HERDR_PROJECTION_ABORT_CLEANUP=0
+      ALLOCATED_WORKTREE_ABORT_CLEANUP=0
     fi
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
@@ -329,6 +331,34 @@ spawn_abort_cleanup() {
           } > "$STATE/$ID.meta" 2>/dev/null || true
         fi
       fi
+    fi
+  fi
+  if [ "$ALLOCATED_WORKTREE_ABORT_CLEANUP" = 1 ]; then
+    ALLOCATED_WORKTREE_ABORT_CLEANUP=0
+    if ! (cd "$PROJ_ABS" && treehouse return --force "$WT") >/dev/null 2>&1; then
+      return_failed=1
+    fi
+    if [ "${HERDR_PROJECTED:-0}" != 1 ]; then
+      fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "$W" 2>/dev/null || true
+    fi
+    if [ "$return_failed" = 1 ]; then
+      mkdir -p "$STATE" 2>/dev/null || true
+      if [ -d "$STATE" ]; then
+        {
+          echo "window=$T"
+          echo "worktree=$WT"
+          echo "project=$PROJ_ABS"
+          echo "harness=$HARNESS"
+          echo "kind=$KIND"
+          echo "mode=${MODE:-no-mistakes}"
+          echo "yolo=${YOLO:-off}"
+          echo "model=${MODEL:-default}"
+          echo "effort=${EFFORT:-default}"
+          echo "backend=$BACKEND"
+          [ -z "${ZELLIJ_TAB_ID:-}" ] || echo "zellij_tab_id=$ZELLIJ_TAB_ID"
+        } > "$STATE/$ID.meta" 2>/dev/null || true
+      fi
+      echo "warning: refused launch endpoint was closed, but treehouse could not return $WT; run bin/fm-teardown.sh $ID --force" >&2
     fi
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
@@ -867,29 +897,113 @@ fi
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
 BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 
+git_common_dir_real() {
+  local repo=$1 common
+  common=$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$common" in
+    /*) ;;
+    *) common="$repo/$common" ;;
+  esac
+  (cd "$common" 2>/dev/null && pwd -P)
+}
+
+same_firstmate_repository() {
+  local project_common firstmate_common
+  project_common=$(git_common_dir_real "$1") || return 1
+  firstmate_common=$(git_common_dir_real "$FM_ROOT") || return 1
+  [ "$project_common" = "$firstmate_common" ]
+}
+
+omp_extension_directory_is_exact_guard() {
+  local extensions=$1 trusted=$2 guard extra
+  [ -d "$extensions" ] && [ ! -L "$extensions" ] || return 1
+  guard="$extensions/fm-primary-turnend-guard.ts"
+  [ -f "$guard" ] && [ ! -L "$guard" ] && [ -f "$trusted" ] || return 1
+  extra=$(find "$extensions" -mindepth 1 ! -path "$guard" -print -quit 2>/dev/null) || return 1
+  [ -z "$extra" ] && cmp -s "$guard" "$trusted"
+}
+
 omp_project_extension_preflight() {
   local project=$1 tracked trusted
-  [ "$HARNESS" = omp ] || return 0
+  [ "$HARNESS" = omp ] || [ "$RAW_LAUNCH" -eq 1 ] || return 0
   [ "$KIND" != secondmate ] || return 0
   tracked=$(git -C "$project" ls-tree -r --name-only HEAD -- .omp/extensions 2>/dev/null || true)
   [ -n "$tracked" ] || return 0
   if [ "$ALLOW_PROJECT_OMP_EXTENSIONS" -eq 1 ]; then
-    echo "warning: launching omp with explicitly approved tracked project extensions:" >&2
+    echo "warning: launching with explicitly approved tracked project extensions:" >&2
     printf '%s\n' "$tracked" | sed 's/^/  /' >&2
     return 0
   fi
   trusted="$FM_ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
-  if [ "$tracked" = ".omp/extensions/fm-primary-turnend-guard.ts" ] \
-    && [ -f "$trusted" ] \
-    && git -C "$project" show HEAD:.omp/extensions/fm-primary-turnend-guard.ts 2>/dev/null | cmp -s - "$trusted"; then
+  if [ "$RAW_LAUNCH" -eq 0 ] \
+    && [ "$tracked" = ".omp/extensions/fm-primary-turnend-guard.ts" ] \
+    && same_firstmate_repository "$project" \
+    && omp_extension_directory_is_exact_guard \
+      "$project/.omp/extensions" "$trusted"; then
     return 0
   fi
-  echo "error: refusing omp launch because the project tracks auto-executed .omp/extensions code:" >&2
+  echo "error: refusing launch because the project tracks auto-executed .omp/extensions code:" >&2
   printf '%s\n' "$tracked" | sed 's/^/  /' >&2
-  echo "omp runs tracked extensions before the model reasons about the task and firstmate passes --auto-approve. Select another verified harness, or pass --allow-project-omp-extensions only after explicit captain approval." >&2
+  echo "OMP runs tracked extensions before the model reasons about the task and firstmate passes --auto-approve. Select another verified harness, or pass --allow-project-omp-extensions only after explicit captain approval." >&2
   return 1
 }
 
+omp_worktree_extension_preflight() {
+  local worktree=$1 extensions trusted discovered
+  [ "$HARNESS" = omp ] || [ "$RAW_LAUNCH" -eq 1 ] || return 0
+  [ "$KIND" != secondmate ] || return 0
+  extensions="$worktree/.omp/extensions"
+  if [ ! -e "$extensions" ] && [ ! -L "$extensions" ]; then
+    return 0
+  fi
+  if [ -d "$extensions" ] && [ ! -L "$extensions" ]; then
+    if ! discovered=$(find "$extensions" -mindepth 1 -print -quit 2>/dev/null); then
+      echo "error: refusing launch because the allocated worktree extensions could not be inspected: $extensions" >&2
+      return 1
+    fi
+    [ -n "$discovered" ] || return 0
+  else
+    discovered=$extensions
+  fi
+  if [ "$ALLOW_PROJECT_OMP_EXTENSIONS" -eq 1 ]; then
+    echo "warning: launching with explicitly approved worktree extensions:" >&2
+    if [ -d "$extensions" ] && [ ! -L "$extensions" ]; then
+      find "$extensions" -mindepth 1 -print 2>/dev/null | sed "s#^$worktree/##; s/^/  /" >&2
+    else
+      printf '  .omp/extensions\n' >&2
+    fi
+    return 0
+  fi
+  trusted="$FM_ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
+  if [ "$RAW_LAUNCH" -eq 0 ] \
+    && same_firstmate_repository "$worktree" \
+    && omp_extension_directory_is_exact_guard "$extensions" "$trusted"; then
+    return 0
+  fi
+  echo "error: refusing launch because the allocated worktree contains auto-executed .omp/extensions code:" >&2
+  if [ -d "$extensions" ] && [ ! -L "$extensions" ]; then
+    find "$extensions" -mindepth 1 -print 2>/dev/null | sed "s#^$worktree/##; s/^/  /" >&2
+  else
+    printf '  .omp/extensions\n' >&2
+  fi
+  echo "OMP runs worktree extensions before the model reasons about the task and firstmate passes --auto-approve. Select another verified harness, or pass --allow-project-omp-extensions only after explicit captain approval." >&2
+  return 1
+}
+
+omp_secondmate_guard_preflight() {
+  local home=$1 extensions trusted
+  [ "$HARNESS" = omp ] || [ "$RAW_LAUNCH" -eq 1 ] || return 0
+  [ "$KIND" = secondmate ] || return 0
+  extensions="$home/.omp/extensions"
+  trusted="$FM_ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
+  if omp_extension_directory_is_exact_guard "$extensions" "$trusted"; then
+    return 0
+  fi
+  echo "error: refusing possible omp secondmate launch because $extensions must contain only the matching primary guard; repair or fast-forward the secondmate home before retrying" >&2
+  return 1
+}
+
+omp_secondmate_guard_preflight "$PROJ_ABS" || exit 1
 omp_project_extension_preflight "$PROJ_ABS" || exit 1
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
@@ -1363,6 +1477,12 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 
   validate_spawn_worktree "treehouse get" "$T"
 fi
+
+if [ "$BACKEND" != orca ] && [ "$KIND" != secondmate ]; then
+  ALLOCATED_WORKTREE_ABORT_CLEANUP=1
+fi
+omp_worktree_extension_preflight "$WT" || exit 1
+ALLOCATED_WORKTREE_ABORT_CLEANUP=0
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.

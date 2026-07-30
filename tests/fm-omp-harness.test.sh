@@ -77,10 +77,12 @@ make_spawn_case() {
 
 make_seeded_secondmate_home() {
   local home=$1 id=$2
-  mkdir -p "$home/bin" "$home/data"
+  mkdir -p "$home/bin" "$home/data" "$home/.omp/extensions"
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
   printf 'charter for %s\n' "$id" > "$home/data/charter.md"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" \
+    "$home/.omp/extensions/fm-primary-turnend-guard.ts"
 }
 
 run_spawn() {
@@ -257,6 +259,76 @@ test_omp_secondmate_launch_omits_ext() {
   assert_absent "$HOME_DIR/state/$id.omp-ext.ts" \
     "omp secondmate must not write a crewmate turn-end signal extension"
   pass "omp secondmate launch omits the -e signal extension and writes no ext file"
+}
+
+test_omp_secondmate_refuses_missing_primary_guard() {
+  local rec id sm out status
+  id=omp-secondmate-no-guard-o6b
+  rec=$(make_spawn_case omp-secondmate-no-guard omp "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  rm "$sm/.omp/extensions/fm-primary-turnend-guard.ts"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 1 "$status" "omp secondmate spawn should refuse a home without the primary guard"
+  assert_contains "$out" "refusing possible omp secondmate launch" \
+    "omp secondmate guard refusal did not explain the missing supervision extension"
+  [ ! -s "$LAUNCH_LOG" ] || fail "omp secondmate guard refusal must happen before a launch command is sent"
+  pass "omp secondmate refuses a stale home without the matching primary guard"
+}
+
+test_omp_secondmate_refuses_unsafe_extension_directory() {
+  local rec id sm out status outside
+  id=omp-secondmate-extra-guard-o6c
+  rec=$(make_spawn_case omp-secondmate-extra-guard omp "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  printf '%s\n' 'throw new Error("sibling extension executed");' > "$sm/.omp/extensions/sibling.js"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 1 "$status" "omp secondmate should refuse an extra extension beside the primary guard"
+  assert_contains "$out" "must contain only the matching primary guard" \
+    "omp secondmate accepted an extra auto-executed extension"
+
+  id=omp-secondmate-symlink-guard-o6d
+  rec=$(make_spawn_case omp-secondmate-symlink-guard omp "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  outside="$CASE_DIR/external-extensions"
+  make_seeded_secondmate_home "$sm" "$id"
+  mkdir -p "$outside"
+  mv "$sm/.omp/extensions/fm-primary-turnend-guard.ts" "$outside/"
+  rmdir "$sm/.omp/extensions"
+  ln -s "$outside" "$sm/.omp/extensions"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 1 "$status" "omp secondmate should refuse a symlinked extension directory"
+  assert_contains "$out" "must contain only the matching primary guard" \
+    "omp secondmate accepted a symlinked extension directory"
+  pass "omp secondmate requires one non-symlinked matching primary guard"
+}
+
+test_wrapped_raw_omp_secondmate_refuses_missing_guard() {
+  local rec id sm out status
+  id=omp-secondmate-wrapped-raw-o6e
+  rec=$(make_spawn_case omp-secondmate-wrapped-raw omp "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  rm "$sm/.omp/extensions/fm-primary-turnend-guard.ts"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$sm" "env FOO=1 omp --auto-approve" --secondmate)
+  status=$?
+  expect_code 1 "$status" "wrapped raw OMP secondmate should not bypass the primary guard check"
+  assert_contains "$out" "refusing possible omp secondmate launch" \
+    "wrapped raw OMP secondmate bypassed the primary guard preflight"
+  pass "wrapped raw OMP secondmate launches require the matching primary guard"
 }
 
 # Model 7 (REQUIRED): --model is threaded for a set model and absent by default.
@@ -459,6 +531,9 @@ test_omp_detection_bun_ancestry
 test_omp_crewmate_launch_shape
 test_omp_crewmate_writes_turnend_ext
 test_omp_secondmate_launch_omits_ext
+test_omp_secondmate_refuses_missing_primary_guard
+test_omp_secondmate_refuses_unsafe_extension_directory
+test_wrapped_raw_omp_secondmate_refuses_missing_guard
 test_omp_threads_model_flag
 test_omp_threads_thinking_effort
 test_omp_threads_max_effort

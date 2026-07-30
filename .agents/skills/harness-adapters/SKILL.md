@@ -392,20 +392,20 @@ But omp sets BOTH `OMPCODE=1` and `CLAUDECODE=1` (detection checks `OMPCODE` fir
 | Effort flag | `--thinking <low\|medium\|high\|xhigh\|max>` (also off/minimal/auto) | `omp --help` plus live `--thinking max` run |
 | Crewmate/scout turn-end | `pi.on("turn_end", ...)` loaded explicitly with `-e state/<id>.omp-ext.ts`; Firstmate writes the per-task extension outside the worktree. | event list + live load |
 | Primary turn-end | `pi.on("session_stop", ...)` returning `{ continue: true, additionalContext }` forces a continuation (omp caps at 8; skips subagents). VERIFIED with BOTH a static return AND an async handler that awaits a spawned subprocess (mirrors runGuard) - both forced the continuation in `omp -p`. | 2 live probes (BANANA static, MANGO async+subprocess) |
-| Primary/secondmate extension | The tracked `<home>/.omp/extensions/fm-primary-turnend-guard.ts` auto-loads on launch from omp's native extension root, with no trust block; secondmates rely on this tracked primary extension rather than a per-task `-e` file. | committed probe's `session_start` fired |
+| Primary/secondmate extension | The tracked `<home>/.omp/extensions/fm-primary-turnend-guard.ts` auto-loads on launch from omp's native extension root, with no trust block; verified and raw secondmate launches fail closed unless that directory contains only this matching non-symlinked guard after the pre-launch fast-forward. | committed probe's `session_start` fired |
 | Extension API / package | `export default function (pi) { pi.on(...) }`; type import `@oh-my-pi/pi-coding-agent` | extensions.md/hooks.md |
 | Trust dialog | none observed blocking on a git worktree | live first launch |
 | Idle composer | rounded box, NO ghost/placeholder text when idle; existing `fm-tmux-lib.sh` detector handles it (no `FM_COMPOSER_IDLE_RE` override) | styled idle capture |
 | Background-notify watcher | `bin/fm-watch-arm.sh` run as an async background job returns `watcher: healthy` and integrates with omp's async-job/`job poll` model (same class as claude/grok) | live arm during this build |
 
 **Security note.**
-omp auto-executes any committed `.omp/extensions/*.ts` on launch with no trust gate.
+omp auto-executes entries discovered under `.omp/extensions` with no trust gate: top-level `.ts`/`.js`, directory `index.ts`/`index.js`, and package-manifest extension entries, including untracked or modified files.
 Combined with the `--auto-approve` that firstmate passes for unattended runs, opening an untrusted project repo on omp runs that repo's extension code, so treat opening an untrusted repo on omp as running its extension code and never point an `--auto-approve` omp launch at a repo you would not execute.
 omp 16.4.8's help says explicit `-e` paths still work with `--no-extensions`, but live probes found that `--no-extensions` suppressed both explicit `-e` and `--hook` files.
 Firstmate therefore cannot disable project auto-discovery without also losing its required crewmate turn-end extension, so the untrusted-repository restriction remains a real safety boundary rather than documentation-only caution.
-`fm-spawn.sh` enforces that boundary before launching an omp crewmate or scout by failing closed when the project tracks `.omp/extensions` code.
-The sole exception is an exact copy of Firstmate's own sole tracked primary guard for firstmate-on-itself work.
-The `--allow-project-omp-extensions` override is accepted only after explicit captain approval and prints every approved tracked path.
+`fm-spawn.sh` enforces that boundary before launching an omp crewmate or scout by checking both the source repository's tracked extensions and every filesystem entry under the allocated worktree's extension directory.
+The sole exception is Firstmate's own sole primary guard when it is byte-identical and the project shares Firstmate's canonical Git common directory; copied guards in unrelated repositories are not trusted.
+The `--allow-project-omp-extensions` override is accepted only after explicit captain approval and prints the approved tracked and worktree paths.
 
 **Fast-forward re-verification checklist (when omp updates).**
 Re-check each fact and patch the named location if it changed:
