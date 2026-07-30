@@ -323,12 +323,55 @@ test_wrapped_raw_omp_secondmate_refuses_missing_guard() {
   rm "$sm/.omp/extensions/fm-primary-turnend-guard.ts"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$sm" "env FOO=1 omp --auto-approve" --secondmate)
+    "$id" "$sm" "'/usr/bin/env' -P /usr/bin FOO=1 omp --auto-approve" --secondmate)
   status=$?
   expect_code 1 "$status" "wrapped raw OMP secondmate should not bypass the primary guard check"
   assert_contains "$out" "refusing possible omp secondmate launch" \
     "wrapped raw OMP secondmate bypassed the primary guard preflight"
   pass "wrapped raw OMP secondmate launches require the matching primary guard"
+}
+
+test_quoted_raw_omp_secondmate_refuses_missing_guard() {
+  local rec id sm out status
+  id=omp-secondmate-quoted-raw-o6g
+  rec=$(make_spawn_case omp-secondmate-quoted-raw omp "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  rm "$sm/.omp/extensions/fm-primary-turnend-guard.ts"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$sm" "'/opt/bin/omp' --auto-approve" --secondmate)
+  status=$?
+  expect_code 1 "$status" "quoted raw OMP secondmate should not bypass the primary guard check"
+  assert_contains "$out" "refusing possible omp secondmate launch" \
+    "quoted raw OMP secondmate bypassed the primary guard preflight"
+  pass "quoted raw OMP executables require the matching primary guard"
+}
+
+test_env_split_string_secondmate_fails_closed() {
+  local launch suffix rec id sm out status
+  for suffix in short long attached; do
+    case "$suffix" in
+      short) launch="env -S 'omp --auto-approve'" ;;
+      long) launch="env --split-string=omp" ;;
+      attached) launch="env -Somp" ;;
+    esac
+    id="omp-secondmate-env-split-$suffix-o6f"
+    rec=$(make_spawn_case "omp-secondmate-env-split-$suffix" omp "$id")
+    read_case_record "$rec"
+    sm="$CASE_DIR/secondmate-home"
+    make_seeded_secondmate_home "$sm" "$id"
+    rm "$sm/.omp/extensions/fm-primary-turnend-guard.ts"
+
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$sm" "$launch" --secondmate)
+    status=$?
+    expect_code 1 "$status" "env split-string secondmate command should fail closed"
+    assert_contains "$out" "env split-string command cannot be verified as non-OMP" \
+      "env split-string secondmate command bypassed the ambiguity preflight"
+  done
+  pass "env split-string secondmate launches fail closed before OMP guard detection"
 }
 
 # Model 7 (REQUIRED): --model is threaded for a set model and absent by default.
@@ -534,6 +577,8 @@ test_omp_secondmate_launch_omits_ext
 test_omp_secondmate_refuses_missing_primary_guard
 test_omp_secondmate_refuses_unsafe_extension_directory
 test_wrapped_raw_omp_secondmate_refuses_missing_guard
+test_quoted_raw_omp_secondmate_refuses_missing_guard
+test_env_split_string_secondmate_fails_closed
 test_omp_threads_model_flag
 test_omp_threads_thinking_effort
 test_omp_threads_max_effort

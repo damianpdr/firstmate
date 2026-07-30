@@ -791,6 +791,23 @@ test_wrapped_raw_omp_refuses_unapproved_extensions() {
   pass "wrapped raw OMP launches require explicit project-extension approval"
 }
 
+test_raw_non_omp_secondmate_does_not_require_omp_guard() {
+  local rec id sm out status
+  id=raw-non-omp-secondmate-z19e
+  rec=$(make_spawn_case raw-non-omp-secondmate omp "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$sm" "bash -lc true" --secondmate)
+  status=$?
+  expect_code 0 "$status" "a raw non-OMP secondmate launch should not require the OMP guard"
+  assert_contains "$out" "spawned $id harness=bash kind=secondmate" \
+    "raw non-OMP secondmate launch did not retain its effective harness"
+  pass "raw non-OMP secondmate launches remain outside the OMP guard preflight"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
@@ -824,4 +841,5 @@ test_omp_allows_exact_firstmate_primary_guard
 test_omp_rejects_copied_guard_outside_firstmate_repository
 test_omp_refuses_untracked_allocated_worktree_extension
 test_wrapped_raw_omp_refuses_unapproved_extensions
+test_raw_non_omp_secondmate_does_not_require_omp_guard
 echo "# all fm-spawn-dispatch-profile tests passed"

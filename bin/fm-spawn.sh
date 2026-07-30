@@ -185,6 +185,7 @@ EFFORT_SET=0
 BACKEND_SET=0
 ALLOW_PROJECT_OMP_EXTENSIONS=0
 RAW_LAUNCH=0
+RAW_HARNESS_AMBIGUOUS=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -537,8 +538,50 @@ case "$ARG3" in
     LAUNCH=$ARG3
     RAW_LAUNCH=1
     HARNESS=""
+    RAW_ENV_WRAPPER=0
+    RAW_ENV_SKIP_NEXT=0
     for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
+      if [ "$RAW_ENV_SKIP_NEXT" -eq 1 ]; then
+        RAW_ENV_SKIP_NEXT=0
+        continue
+      fi
+      RAW_WORD=$word
+      case "$RAW_WORD" in
+        \'*\') RAW_WORD=${RAW_WORD#\'}; RAW_WORD=${RAW_WORD%\'} ;;
+        \"*\") RAW_WORD=${RAW_WORD#\"}; RAW_WORD=${RAW_WORD%\"} ;;
+        *\'*|*\"*)
+          RAW_HARNESS_AMBIGUOUS=1
+          break
+          ;;
+      esac
+      case "$RAW_WORD" in
+        [A-Za-z_]*=*) continue ;;
+        env|*/env)
+          RAW_ENV_WRAPPER=1
+          continue
+          ;;
+      esac
+      if [ "$RAW_ENV_WRAPPER" -eq 1 ]; then
+        case "$RAW_WORD" in
+          -u|--unset|-C|--chdir|-P|-a|--argv0)
+            RAW_ENV_SKIP_NEXT=1
+            continue
+            ;;
+          -u?*|-C?*|-P?*|-a?*)
+            continue
+            ;;
+          -S|--split-string|-S?*|--split-string=*)
+            RAW_HARNESS_AMBIGUOUS=1
+            break
+            ;;
+          --unset=*|--chdir=*|--argv0=*|-i|--ignore-environment|--)
+            continue
+            ;;
+          -*) continue ;;
+        esac
+      fi
+      HARNESS=$(basename "$RAW_WORD")
+      break
     done
     ;;
   '')
@@ -992,8 +1035,12 @@ omp_worktree_extension_preflight() {
 
 omp_secondmate_guard_preflight() {
   local home=$1 extensions trusted
-  [ "$HARNESS" = omp ] || [ "$RAW_LAUNCH" -eq 1 ] || return 0
   [ "$KIND" = secondmate ] || return 0
+  if [ "$RAW_LAUNCH" -eq 1 ] && [ "$RAW_HARNESS_AMBIGUOUS" -eq 1 ]; then
+    echo "error: refusing raw secondmate launch because an env split-string command cannot be verified as non-OMP; use a direct executable command" >&2
+    return 1
+  fi
+  [ "$HARNESS" = omp ] || return 0
   extensions="$home/.omp/extensions"
   trusted="$FM_ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
   if omp_extension_directory_is_exact_guard "$extensions" "$trusted"; then
