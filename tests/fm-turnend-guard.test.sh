@@ -1104,6 +1104,49 @@ test_hook_claude_mode_secondmate_reblocks_like_primary() {
   pass "fm-turnend-guard --claude: secondmate home re-blocks unclaimed and allows auto-arm-claimed stops"
 }
 
+test_omp_session_stop_continues_once_per_episode() {
+  local root home ext log out status
+  root="$TMP_ROOT/omp-session-stop-root"
+  home="$TMP_ROOT/omp-session-stop-home"
+  ext="$root/.omp/extensions/fm-primary-turnend-guard.ts"
+  log="$TMP_ROOT/omp-session-stop.log"
+  mkdir -p "$root/.omp/extensions" "$root/bin" "$home/state"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cat > "$root/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'run\n' >> "${FM_GUARD_LOG:?}"
+printf 'guard fired\n' >&2
+exit 2
+SH
+  chmod +x "$root/bin/fm-turnend-guard.sh"
+  out=$(PLUGIN="$ext" FM_HOME="$home" FM_GUARD_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const pi = { on(event, handler) { handlers.set(event, handler); } };
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const sessionStop = handlers.get("session_stop");
+if (!sessionStop) throw new Error("OMP session_stop handler was not registered");
+const first = await sessionStop();
+if (first?.continue !== true) throw new Error(`first guarded stop did not continue: ${JSON.stringify(first)}`);
+if (!first.additionalContext?.includes("guard fired")) throw new Error(`guard reason missing: ${first.additionalContext}`);
+const second = await sessionStop();
+if (second !== undefined) throw new Error(`one-shot continuation did not allow the next stop: ${JSON.stringify(second)}`);
+const third = await sessionStop();
+if (third?.continue !== true) throw new Error(`new episode did not re-arm continuation: ${JSON.stringify(third)}`);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "OMP session_stop one-shot continuation"
+  [ -z "$out" ] || fail "OMP session_stop one-shot continuation printed output: $out"
+  [ "$(wc -l < "$log" | tr -d ' ')" = 2 ] \
+    || fail "OMP session_stop must skip the guard only for the one forced continuation"
+  pass ".omp primary extension: session_stop forces one continuation and re-arms for the next episode"
+}
+
+
 test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
@@ -1145,6 +1188,8 @@ test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
+test_omp_session_stop_continues_once_per_episode
+
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive

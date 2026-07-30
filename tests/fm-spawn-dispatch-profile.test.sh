@@ -25,7 +25,11 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  has-session|new-session|new-window) exit 0 ;;
+  kill-window)
+    [ -z "${FM_FAKE_ENDPOINT_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_ENDPOINT_LOG"
+    exit 0
+    ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -42,7 +46,13 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse pi-signed
+  fm_fake_exit0 "$fakebin" pi-signed
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -80,6 +90,18 @@ make_seeded_secondmate_home() {
   printf 'charter for %s\n' "$id" > "$home/data/charter.md"
 }
 
+commit_project_omp_extension() {
+  local proj=$1 source=${2:-}
+  mkdir -p "$proj/.omp/extensions"
+  if [ -n "$source" ]; then
+    cp "$source" "$proj/.omp/extensions/fm-primary-turnend-guard.ts"
+  else
+    printf '%s\n' 'throw new Error("project extension executed");' > "$proj/.omp/extensions/project.ts"
+  fi
+  git -C "$proj" add .omp/extensions
+  git -C "$proj" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'add omp extension'
+}
+
 run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
@@ -94,6 +116,8 @@ run_spawn() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
+    FM_FAKE_ENDPOINT_LOG="${FM_FAKE_ENDPOINT_LOG:-}" \
+    FM_FAKE_TREEHOUSE_LOG="${FM_FAKE_TREEHOUSE_LOG:-}" \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -123,7 +147,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -599,7 +623,7 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
@@ -655,6 +679,135 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_omp_refuses_unapproved_project_extensions() {
+  local rec id out status
+  id=omp-project-ext-z17
+  rec=$(make_spawn_case omp-project-ext omp "$id")
+  read_case_record "$rec"
+  commit_project_omp_extension "$PROJ_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "omp spawn should refuse tracked project extensions without approval"
+  assert_contains "$out" "refusing launch because the project tracks auto-executed .omp/extensions code" \
+    "omp spawn did not explain the project-extension refusal"
+  assert_contains "$out" ".omp/extensions/project.ts" "omp refusal did not name the auto-executed file"
+  assert_contains "$out" "--allow-project-omp-extensions only after explicit captain approval" \
+    "omp refusal did not explain the explicit override"
+  assert_absent "$HOME_DIR/state/$id.meta" "omp extension refusal should happen before meta is written"
+  [ ! -s "$LAUNCH_LOG" ] || fail "omp extension refusal must happen before a launch command is sent"
+  pass "omp refuses unapproved tracked project extensions before spawning"
+}
+
+test_omp_allows_explicitly_approved_project_extensions() {
+  local rec id out status launch
+  id=omp-project-ext-approved-z18
+  rec=$(make_spawn_case omp-project-ext-approved omp "$id")
+  read_case_record "$rec"
+  commit_project_omp_extension "$PROJ_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --allow-project-omp-extensions)
+  status=$?
+  expect_code 0 "$status" "explicit approval should allow the omp project extension"
+  assert_contains "$out" "warning: launching with explicitly approved tracked project extensions" \
+    "approved omp launch did not surface the extension warning"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "omp --auto-approve" "approved omp extension launch did not reach omp"
+  pass "omp accepts tracked project extensions only through the explicit approval flag"
+}
+
+test_omp_rejects_copied_guard_outside_firstmate_repository() {
+  local rec id out status
+  id=omp-copied-firstmate-guard-z19
+  rec=$(make_spawn_case omp-copied-firstmate-guard omp "$id")
+  read_case_record "$rec"
+  commit_project_omp_extension "$PROJ_DIR" "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "a copied firstmate guard in an unrelated repository should be refused"
+  assert_contains "$out" "refusing launch because the project tracks auto-executed .omp/extensions code" \
+    "the copied guard bypassed repository-lineage validation"
+  pass "omp rejects a copied firstmate guard outside the firstmate repository"
+}
+
+test_omp_allows_exact_firstmate_primary_guard() {
+  local rec id out status
+  id=omp-firstmate-guard-z19b
+  rec=$(make_spawn_case omp-firstmate-guard omp "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$ROOT")
+  status=$?
+  expect_code 0 "$status" "the exact sole guard in the firstmate repository should be allowlisted"
+  assert_not_contains "$out" "refusing launch" "the exact firstmate primary guard was not allowlisted"
+  assert_contains "$out" "spawned $id harness=omp" "allowlisted firstmate guard did not reach the omp spawn"
+  pass "omp allowlists the exact sole guard only for the firstmate repository"
+}
+
+test_omp_refuses_untracked_allocated_worktree_extension() {
+  local rec id out status treehouse_log endpoint_log
+  id=omp-untracked-worktree-ext-z19c
+  rec=$(make_spawn_case omp-untracked-worktree-ext omp "$id")
+  read_case_record "$rec"
+  treehouse_log="$CASE_DIR/treehouse.log"
+  endpoint_log="$CASE_DIR/endpoint.log"
+  mkdir -p "$WT_DIR/.omp/extensions/nested"
+  printf '%s\n' 'throw new Error("untracked extension executed");' > "$WT_DIR/.omp/extensions/untracked.js"
+  printf '%s\n' 'throw new Error("nested extension executed");' > "$WT_DIR/.omp/extensions/nested/index.ts"
+  printf '%s\n' '{"omp":{"extensions":["./nested/index.ts"]}}' > "$WT_DIR/.omp/extensions/package.json"
+
+  out=$(FM_FAKE_TREEHOUSE_LOG="$treehouse_log" FM_FAKE_ENDPOINT_LOG="$endpoint_log" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "omp spawn should refuse untracked extension forms in the allocated worktree"
+  assert_contains "$out" "allocated worktree contains auto-executed .omp/extensions code" \
+    "omp spawn did not inspect the actual allocated worktree"
+  assert_contains "$out" ".omp/extensions/untracked.js" "omp refusal did not report the JavaScript extension"
+  assert_contains "$out" ".omp/extensions/nested/index.ts" "omp refusal did not report the nested extension"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "omp --auto-approve" \
+    "omp must not start after the allocated-worktree extension refusal"
+  assert_grep "return --force $WT_DIR" "$treehouse_log" \
+    "allocated-worktree refusal did not return the treehouse lease"
+  assert_grep "kill-window" "$endpoint_log" \
+    "allocated-worktree refusal did not close the created backend endpoint"
+  pass "omp refuses every allocated-worktree extension form and rolls back allocation"
+}
+
+test_wrapped_raw_omp_refuses_unapproved_extensions() {
+  local rec id out status
+  id=omp-wrapped-raw-ext-z19d
+  rec=$(make_spawn_case omp-wrapped-raw-ext omp "$id")
+  read_case_record "$rec"
+  commit_project_omp_extension "$PROJ_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "env FOO=1 omp --auto-approve")
+  status=$?
+  expect_code 1 "$status" "a wrapped raw OMP launch should not bypass extension approval"
+  assert_contains "$out" "refusing launch because the project tracks auto-executed .omp/extensions code" \
+    "wrapped raw OMP launch bypassed the extension preflight"
+  pass "wrapped raw OMP launches require explicit project-extension approval"
+}
+
+test_raw_non_omp_secondmate_does_not_require_omp_guard() {
+  local rec id sm out status
+  id=raw-non-omp-secondmate-z19e
+  rec=$(make_spawn_case raw-non-omp-secondmate omp "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$sm" "bash -lc true" --secondmate)
+  status=$?
+  expect_code 0 "$status" "a raw non-OMP secondmate launch should not require the OMP guard"
+  assert_contains "$out" "spawned $id harness=bash kind=secondmate" \
+    "raw non-OMP secondmate launch did not retain its effective harness"
+  pass "raw non-OMP secondmate launches remain outside the OMP guard preflight"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
@@ -681,5 +834,12 @@ test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_omp_refuses_unapproved_project_extensions
+test_omp_allows_explicitly_approved_project_extensions
+test_omp_allows_exact_firstmate_primary_guard
 
+test_omp_rejects_copied_guard_outside_firstmate_repository
+test_omp_refuses_untracked_allocated_worktree_extension
+test_wrapped_raw_omp_refuses_unapproved_extensions
+test_raw_non_omp_secondmate_does_not_require_omp_guard
 echo "# all fm-spawn-dispatch-profile tests passed"

@@ -14,7 +14,11 @@
 # OpenCode and pi adapters use the same predicate and force one bounded
 # follow-up because their turn-end events are passive. Grok delegates native
 # blocking when its running Stop payload advertises that capability, with one
-# bounded resume fallback for payloads from pre-native processes.
+# bounded resume fallback for payloads from pre-native processes. omp's
+# session_stop extension blocks directly via a {continue:true} return value
+# (not exit-2). It pipes stop_hook_active:false and forces one continuation on
+# guard exit 2, bounded by omp's built-in 8-continuation cap plus the
+# extension's one-shot in-process flag.
 # See docs/turnend-guard.md for the per-harness mechanics, validation evidence,
 # and fail-open tradeoffs.
 #
@@ -32,8 +36,9 @@
 # Codex uses stop_hook_active and Grok uses stopHookActive; typed camel-case
 # takes precedence when both spellings are present. A true value means the
 # current stop attempt already follows a block, so this guard always allows it.
-# Passive harness adapters provide their own one-follow-up guard before calling
-# this script.
+# Passive harness adapters, and omp's session_stop extension, provide their own
+# one-follow-up guard before calling this script (omp additionally caps
+# continuations at 8).
 # That bounds those harnesses to at most one forced continuation per turn -
 # never a wedged, un-endable session - while still nagging again on a later turn
 # if the problem persists.

@@ -148,6 +148,98 @@ EOF
   pass "OpenCode session.created delivers the exact wrapper nudge once per session"
 }
 
+test_omp_session_start_delivers_exact_nudge() {
+  local root home ext guardlog out status=0
+  root="$TMP_ROOT/omp-primary"
+  home="$TMP_ROOT/omp-home"
+  ext="$root/.omp/extensions/fm-primary-turnend-guard.ts"
+  guardlog="$root/guard-env.log"
+  fm_git_init_commit "$root"
+  mkdir -p "$root/.omp/extensions" "$root/bin"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ext"
+  printf '# Firstmate\n' > "$root/AGENTS.md"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$root/bin/fm-primary-scope-lib.sh"
+  cat > "$root/bin/fm-sessionstart-nudge.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${EXPECTED:?}"
+SH
+  chmod +x "$root/bin/fm-sessionstart-nudge.sh"
+  cat > "$root/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\t%s\n' "${OMPCODE:-}" "${CLAUDECODE:-}" > "${OMP_GUARD_ENV_LOG:?}"
+SH
+  chmod +x "$root/bin/fm-turnend-guard.sh"
+  out=$(PLUGIN="$ext" FM_HOME="$home" EXPECTED="$NUDGE_LINE" OMP_GUARD_ENV_LOG="$guardlog" CLAUDECODE=1 node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { existsSync, mkdirSync } from "node:fs";
+
+const handlers = new Map();
+const messages = [];
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  sendMessage(message) {
+    messages.push(message);
+  },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const sessionStart = handlers.get("session_start");
+if (!sessionStart) throw new Error("OMP session_start handler was not registered");
+sessionStart({ type: "session_start" });
+if (messages.length !== 1) throw new Error(`expected one OMP nudge, got ${messages.length}`);
+const message = messages[0];
+if (message.customType !== "firstmate-sessionstart-nudge") throw new Error(`unexpected custom type: ${message.customType}`);
+if (message.content !== process.env.EXPECTED) throw new Error(`unexpected nudge: ${message.content}`);
+if (message.display !== false) throw new Error("OMP nudge must remain hidden context");
+const marker = `${process.env.FM_HOME}/state/.omp-turnend-extension-loaded`;
+if (existsSync(marker)) throw new Error("OMP extension created state in an uninitialized primary");
+mkdirSync(`${process.env.FM_HOME}/state`, { recursive: true });
+sessionStart({ type: "session_start" });
+if (!existsSync(marker)) throw new Error("OMP extension did not mark an initialized primary");
+const sessionStop = handlers.get("session_stop");
+if (!sessionStop) throw new Error("OMP session_stop handler was not registered");
+await sessionStop({ type: "session_stop" });
+EOF
+  ) || status=$?
+  expect_code 0 "$status" "OMP exact session_start nudge delivery"
+  [ -z "$out" ] || fail "OMP exact session_start nudge delivery printed output: $out"
+  assert_present "$home/state/.omp-turnend-extension-loaded" \
+    "OMP primary extension must mark an initialized primary state directory"
+  assert_grep 'sha256:' "$home/state/.omp-turnend-extension-loaded" \
+    "OMP primary extension marker must record the extension version"
+  [ "$(cat "$guardlog")" = $'1\t1' ] \
+    || fail "OMP session_stop guard did not receive explicit OMP identity"
+  pass "OMP native events deliver the startup nudge, preserve OMP guard identity, and remain inert without state"
+}
+
+test_omp_marker_is_inert_in_linked_task_worktree() {
+  local project worktree ext out status=0
+  project="$TMP_ROOT/omp-linked-project"
+  worktree="$TMP_ROOT/omp-linked-worktree"
+  fm_git_worktree "$project" "$worktree" "omp-linked-worktree"
+  ext="$worktree/.omp/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$worktree/.omp/extensions" "$worktree/bin" "$worktree/state"
+  printf '# Firstmate\n' > "$worktree/AGENTS.md"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$worktree/bin/fm-primary-scope-lib.sh"
+
+  out=$(PLUGIN="$ext" FM_HOME="$worktree" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const pi = { on() {} };
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+EOF
+  ) || status=$?
+  expect_code 0 "$status" "OMP linked-task-worktree marker scope"
+  [ -z "$out" ] || fail "OMP linked-task-worktree marker scope printed output: $out"
+  assert_absent "$worktree/state/.omp-turnend-extension-loaded" \
+    "OMP extension must not mark an unmarked linked task worktree with pre-existing state"
+  pass "OMP extension marker remains inert in linked task worktrees with state"
+}
+
+
 test_genuine_primary_nudges
 test_gate_env_is_silent
 test_gate_common_dir_is_silent
@@ -156,3 +248,5 @@ test_linked_secondmate_primary_nudges
 test_missing_state_is_silent
 test_owned_lock_is_silent
 test_opencode_plugin_delivers_exact_nudge_once
+test_omp_session_start_delivers_exact_nudge
+test_omp_marker_is_inert_in_linked_task_worktree
